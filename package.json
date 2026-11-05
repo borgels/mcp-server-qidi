@@ -1,0 +1,66 @@
+{
+  "name": "mcp-server-qidi",
+  "version": "0.1.0",
+  "description": "MCP server for a QIDI X-Plus5 (Klipper/Moonraker) 3D printer: status, webcam, QIDI Box, files, history, and gated control (light, temperatures, pause/resume/cancel, start print).",
+  "type": "module",
+  "main": "./dist/transports/stdio.js",
+  "exports": {
+    ".": "./dist/transports/stdio.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    ".env.example"
+  ],
+  "bin": {
+    "mcp-server-qidi": "./dist/transports/stdio.js"
+  },
+  "scripts": {
+    "build": "tsup src/transports/stdio.ts src/transports/http.ts src/server.ts --format esm --dts --clean --sourcemap",
+    "dev": "tsx src/transports/stdio.ts",
+    "dev:http": "tsx src/transports/http.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepare": "npm run build",
+    "prepack": "npm run typecheck && npm test && npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/borgels/mcp-server-qidi.git"
+  },
+  "keywords": [
+    "mcp",
+    "qidi",
+    "klipper",
+    "moonraker",
+    "3d-printer"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bugs": {
+    "url": "https://github.com/borgels/mcp-server-qidi/issues"
+  },
+  "homepage": "https://github.com/borgels/mcp-server-qidi#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.4.3"
+  },
+  "overrides": {
+    "ip-address": ">=10.1.1",
+    "hono": ">=4.12.25",
+    "fast-uri": ">=3.1.2",
+    "qs": ">=6.15.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.9"
+  }
+}
