@@ -175,3 +175,17 @@ describe('qidi tools', () => {
     expect(result.isError).toBe(true);
   });
 });
+
+describe('moonraker client', () => {
+  it('sends the API key when configured', async () => {
+    const headers: Array<Record<string, string>> = [];
+    const fetchImpl = (async (_: unknown, init?: RequestInit) => {
+      headers.push((init?.headers ?? {}) as Record<string, string>);
+      return new Response(JSON.stringify({ result: {} }));
+    }) as unknown as typeof fetch;
+    await new MoonrakerClient({ baseUrl: 'http://p:7125', apiKey: 'k', fetchImpl }).get('/server/info');
+    await new MoonrakerClient({ baseUrl: 'http://p:7125', fetchImpl }).get('/server/info');
+    expect(headers[0]?.['x-api-key']).toBe('k');
+    expect(headers[1]?.['x-api-key']).toBeUndefined();
+  });
+});

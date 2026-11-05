@@ -5,6 +5,8 @@ export interface MoonrakerClientOptions {
   baseUrl?: string;
   /** Webcam snapshot URL (mjpeg-streamer), e.g. http://printer.lan/webcam/?action=snapshot */
   snapshotUrl?: string;
+  /** Moonraker API key, sent as X-Api-Key. Needed once the printer no longer trusts our address range. */
+  apiKey?: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
@@ -23,6 +25,7 @@ export interface Snapshot {
 export class MoonrakerClient {
   readonly baseUrl: string;
   readonly snapshotUrl: string;
+  private readonly apiKey?: string;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
@@ -30,6 +33,7 @@ export class MoonrakerClient {
     this.baseUrl = (options.baseUrl ?? process.env.QIDI_MOONRAKER_URL ?? 'http://localhost:7125').replace(/\/+$/, '');
     this.snapshotUrl =
       options.snapshotUrl ?? process.env.QIDI_SNAPSHOT_URL ?? `${new URL(this.baseUrl).origin.replace(/:\d+$/, '')}/webcam/?action=snapshot`;
+    this.apiKey = options.apiKey ?? (process.env.QIDI_MOONRAKER_API_KEY || undefined);
     this.timeoutMs = options.timeoutMs ?? Number(process.env.QIDI_TIMEOUT_MS ?? 10_000);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
@@ -57,7 +61,9 @@ export class MoonrakerClient {
   }
 
   async snapshot(): Promise<Snapshot> {
-    const response = await this.fetchImpl(this.snapshotUrl, { signal: AbortSignal.timeout(this.timeoutMs) });
+    const response = await this.fetchImpl(this.snapshotUrl, {
+      headers: this.apiKey ? { 'x-api-key': this.apiKey } : {},
+      signal: AbortSignal.timeout(this.timeoutMs) });
     if (!response.ok) {
       throw new MoonrakerHttpError(response.status, 'webcam snapshot', await response.text().catch(() => ''));
     }
@@ -76,7 +82,7 @@ export class MoonrakerClient {
 
     const response = await this.fetchImpl(url, {
       method,
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json', ...(this.apiKey ? { 'x-api-key': this.apiKey } : {}) },
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     const text = await response.text();

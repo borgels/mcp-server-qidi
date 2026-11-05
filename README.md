@@ -50,6 +50,7 @@ A snapshot is good for one start.
 |---|---|---|
 | `QIDI_MOONRAKER_URL` | `http://localhost:7125` | Moonraker base URL. |
 | `QIDI_SNAPSHOT_URL` | `<host>/webcam/?action=snapshot` | mjpeg-streamer snapshot. |
+| `QIDI_MOONRAKER_API_KEY` | — | Sent as `X-Api-Key`. Set it and remove the server's address range from Moonraker's `trusted_clients`, so only this container can drive the printer. |
 | `QIDI_ENABLE_CONTROL` | `false` | Light, temperatures, pause/resume/cancel, e-stop, restart. |
 | `QIDI_ENABLE_PRINT_START` | `false` | `qidi_start_print`. |
 | `QIDI_MAX_NOZZLE_TEMP` / `_BED_TEMP` / `_CHAMBER_TEMP` | 300 / 110 / 65 | Remote target caps (°C). |
