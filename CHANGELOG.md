@@ -25,8 +25,11 @@
 
 - Temperature caps and the plate-check age fail closed: the tools refuse to act
   when a limit is invalid.
-- `qidi_start_print` refuses when the previous job's end time cannot be read as a
-  number, instead of skipping the "snapshot after the last job" check.
+- `qidi_start_print` refuses when the print history or the previous job's end
+  time cannot be read (missing job list, non-numeric or negative end time),
+  instead of skipping the "snapshot after the last job" check. An empty
+  history still allows a start.
+- Webcam snapshot redirects are only followed to `http`/`https` URLs.
 - HTTP transport: failed-authentication limiting per client address (`429` with
   `Retry-After`; new `MCP_AUTH_FAILURE_LIMIT`, `MCP_AUTH_FAILURE_WINDOW_MS`), `Host`
   header check on loopback binds (new `MCP_ALLOWED_HOSTS`), `401` with

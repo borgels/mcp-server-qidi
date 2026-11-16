@@ -17,6 +17,7 @@ interface PrinterFake {
   state: string;
   filename: string;
   lastJobEnd: number; // epoch seconds
+  history?: unknown; // overrides the history/list result
 }
 
 function fakePrinter(printer: PrinterFake) {
@@ -40,7 +41,7 @@ function fakePrinter(printer: PrinterFake) {
         },
       });
     }
-    if (url.pathname === '/server/history/list') return ok({ count: 1, jobs: [{ end_time: printer.lastJobEnd }] });
+    if (url.pathname === '/server/history/list') return ok(printer.history !== undefined ? printer.history : { count: 1, jobs: [{ end_time: printer.lastJobEnd }] });
     if (url.pathname === '/server/files/metadata') {
       if (url.searchParams.get('filename') === 'missing.gcode') return new Response(JSON.stringify({ error: { message: 'Metadata not available' } }), { status: 404 });
       return ok({ filename: url.searchParams.get('filename'), estimated_time: 3600, filament_type: 'PETG' });
@@ -134,6 +135,32 @@ describe('qidi tools', () => {
     const result = await call('qidi_start_print', { filename: 'part.gcode', plateIsEmpty: true });
     expect(result.isError).toBe(true);
     expect(seen.some(s => s.path === '/printer/print/start')).toBe(false);
+  });
+
+  it.each([
+    ['empty-string end time', { count: 1, jobs: [{ end_time: '' }] }],
+    ['boolean end time', { count: 1, jobs: [{ end_time: false }] }],
+    ['array end time', { count: 1, jobs: [{ end_time: [] }] }],
+    ['negative end time', { count: 1, jobs: [{ end_time: -5 }] }],
+    ['missing jobs array', {}],
+    ['jobs not an array', { jobs: {} }],
+    ['string result', 'oops'],
+  ])('refuses to start when the print history is unreadable (%s)', async (_label, history) => {
+    const { call, seen } = await connect({ state: 'complete', filename: '', lastJobEnd: 0, history }, now);
+    await call('qidi_snapshot');
+    time += 60_000;
+    const result = await call('qidi_start_print', { filename: 'part.gcode', plateIsEmpty: true });
+    expect(result.isError).toBe(true);
+    expect(seen.some(s => s.path === '/printer/print/start')).toBe(false);
+  });
+
+  it('starts when there is no previous job', async () => {
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, history: { count: 0, jobs: [] } }, now);
+    await call('qidi_snapshot');
+    time += 60_000;
+    const result = await call('qidi_start_print', { filename: 'part.gcode', plateIsEmpty: true });
+    expect(result.isError).toBeFalsy();
+    expect(seen.some(s => s.path === '/printer/print/start')).toBe(true);
   });
 
   it('refuses to start while printing', async () => {

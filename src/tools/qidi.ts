@@ -417,10 +417,18 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
             `No webcam snapshot in the last ${maxAge / 60_000} min. Take qidi_snapshot (light=true), check that the plate is empty, then try again.`,
           );
         }
-        const lastJob = await client.get<{ jobs: Array<{ end_time?: number | null }> }>('/server/history/list', { limit: 1, order: 'desc' });
-        const lastEnd = Number(lastJob?.jobs?.[0]?.end_time ?? 0) * 1000;
-        // Fail closed: an end time that is not a number must not skip the check.
-        if (!Number.isFinite(lastEnd) || (lastEnd > 0 && !(lastSnapshotAt >= lastEnd))) {
+        const lastJob = await client.get<{ jobs?: unknown }>('/server/history/list', { limit: 1, order: 'desc' });
+        // Fail closed: a history or end time that cannot be read must not skip the check.
+        const jobs = lastJob?.jobs;
+        if (!Array.isArray(jobs)) {
+          throw new PrinterStateError('The print history could not be read, so the plate check cannot be confirmed. Try again later.');
+        }
+        const rawEnd = (jobs[0] as { end_time?: unknown } | undefined)?.end_time;
+        if (rawEnd !== undefined && rawEnd !== null && (typeof rawEnd !== 'number' || !Number.isFinite(rawEnd) || rawEnd < 0)) {
+          throw new PrinterStateError('The end time of the previous job could not be read, so the plate check cannot be confirmed.');
+        }
+        const lastEnd = (typeof rawEnd === 'number' ? rawEnd : 0) * 1000;
+        if (lastEnd > 0 && !(lastSnapshotAt >= lastEnd)) {
           throw new PrinterStateError('The last snapshot is older than the end of the previous job. Take a new qidi_snapshot and check the plate.');
         }
 

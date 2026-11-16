@@ -89,7 +89,12 @@ export class MoonrakerClient {
       } catch {
         next = undefined;
       }
-      if (!next || hops >= MAX_SNAPSHOT_REDIRECTS || (this.apiKey && next.origin !== url.origin)) {
+      if (
+        !next ||
+        (next.protocol !== 'http:' && next.protocol !== 'https:') ||
+        hops >= MAX_SNAPSHOT_REDIRECTS ||
+        (this.apiKey && next.origin !== url.origin)
+      ) {
         throw new Error(
           `webcam snapshot responded with a redirect (HTTP ${response.status}) that is not followed ` +
             `(only ${MAX_SNAPSHOT_REDIRECTS} hops${this.apiKey ? ' on the same origin' : ''} are)`,
