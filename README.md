@@ -53,14 +53,19 @@ A snapshot is good for one start.
 ### Box drying limit
 
 `qidi_box_drying` refuses (does not lower) a temperature above the limit for
-that box: the lowest limit among the slots with filament inserted, by filament
-type — 55 °C for PLA, PVA and TPU, 65 °C for PETG, PET, ABS, ASA, PC, PA and
+that box: the lowest limit among all its slots, by the material each slot is
+set up with (the insert sensors are ignored, because spools are ejected before
+drying and then read empty), by filament type — 55 °C for PLA, PVA and TPU, 65 °C for PETG, PET, ABS, ASA, PC, PA and
 PPS, 50 °C for anything unrecognised — and never above `QIDI_MAX_BOX_DRY_TEMP`.
 The limit is only as good as the slot setup, so correct a wrong slot with
 `qidi_box_set_slot` first. Drying started from the touchscreen is not covered.
 
 Each Box tool checks Klipper's command list first, so a firmware without the
-command fails with a clear message instead of an unknown-command error.
+command fails with a clear message instead of an unknown-command error. The
+commands are the ones the Plus5 touchscreen sends (`UPDATE_FILAMENT_INFORMATION`,
+`LOAD_/UNLOAD_FILAMENT_CONTROL`, `BOX_START_DRYING BOX= TIME=<hours> TEMP=`,
+`BOX_STOP_DRYING`), with the older Box firmware's `E_LOAD`/`E_UNLOAD` and
+`ENABLE_BOX_DRY`/`DISABLE_BOX_DRY` as fallback.
 
 ## Configuration
 

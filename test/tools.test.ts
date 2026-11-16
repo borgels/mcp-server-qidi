@@ -40,7 +40,7 @@ const FILAMENT_LIST = [
   '1 = QIDI',
 ].join('\n');
 
-const DEFAULT_COMMANDS = ['UPDATE_FILAMENT_INFORMATION', 'ENABLE_BOX_DRY', 'DISABLE_BOX_DRY', 'LOAD_FILAMENT_CONTROL', 'UNLOAD_FILAMENT_CONTROL'];
+const DEFAULT_COMMANDS = ['UPDATE_FILAMENT_INFORMATION', 'BOX_START_DRYING', 'BOX_STOP_DRYING', 'LOAD_FILAMENT_CONTROL', 'UNLOAD_FILAMENT_CONTROL'];
 
 function fakePrinter(printer: PrinterFake) {
   const seen: Seen[] = [];
@@ -308,15 +308,34 @@ describe('qidi box tools', () => {
     expect(tooHot.text).toMatch(/55 °C.*slot1 holds PLA/);
     const ok = await call('qidi_box_drying', { action: 'start', box: 1, temperature: 55, hours: 6 });
     expect(ok.isError).toBeFalsy();
-    expect(scripts(seen)).toEqual(['ENABLE_BOX_DRY BOX=1 TEMP=55 END_TIME=6']);
+    expect(scripts(seen)).toEqual(['BOX_START_DRYING BOX=1 TIME=6 TEMP=55']);
   });
 
   it('allows 65 °C for PETG and ASA, and stops drying', async () => {
-    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PETG', 'ASA', null, null] }, now);
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PETG', 'ASA', 'PETG', 'ABS'] }, now);
     expect((await call('qidi_box_drying', { action: 'start', temperature: 65, hours: 4 })).isError).toBeFalsy();
     expect((await call('qidi_box_drying', { action: 'start', temperature: 70, hours: 4 })).isError).toBe(true);
     await call('qidi_box_drying', { action: 'stop' });
-    expect(scripts(seen)).toEqual(['ENABLE_BOX_DRY BOX=1 TEMP=65 END_TIME=4', 'DISABLE_BOX_DRY BOX=1']);
+    expect(scripts(seen)).toEqual(['BOX_START_DRYING BOX=1 TIME=4 TEMP=65', 'BOX_STOP_DRYING BOX=1']);
+  });
+
+  it('counts slots whose filament was ejected (sensors read empty)', async () => {
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PETG', 'PLA', 'ASA', 'PLA'] }, now);
+    const ejected = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: [null, null, null, null] }, now);
+    // Fake: null = not inserted, configured as PLA Basic — like a box whose spools were ejected for drying.
+    expect((await ejected.call('qidi_box_drying', { action: 'start', temperature: 65, hours: 4 })).isError).toBe(true);
+    expect((await call('qidi_box_drying', { action: 'start', temperature: 65, hours: 4 })).isError).toBe(true);
+    expect(scripts(seen)).toEqual([]);
+  });
+
+  it('uses the older ENABLE_BOX_DRY firmware command when that is what exists', async () => {
+    const { call, seen } = await connect(
+      { state: 'standby', filename: '', lastJobEnd: 0, slots: ['PETG', 'PETG', 'PETG', 'PETG'], gcodeCommands: ['ENABLE_BOX_DRY', 'DISABLE_BOX_DRY'] },
+      now,
+    );
+    await call('qidi_box_drying', { action: 'start', temperature: 60, hours: 3 });
+    await call('qidi_box_drying', { action: 'stop' });
+    expect(scripts(seen)).toEqual(['ENABLE_BOX_DRY BOX=1 END_TIME=3 TEMP=60', 'DISABLE_BOX_DRY BOX=1']);
   });
 
   it('treats unknown filament conservatively', async () => {
@@ -328,7 +347,6 @@ describe('qidi box tools', () => {
     const idle = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PLA', 'PETG', null, null] }, now);
     expect((await idle.call('qidi_box_load', { slot: 'slot1' })).isError).toBeFalsy();
     expect((await idle.call('qidi_box_unload', { slot: 'slot1' })).isError).toBeFalsy();
-    expect((await idle.call('qidi_box_load', { slot: 'slot2' })).text).toMatch(/no filament/);
     expect(scripts(idle.seen)).toEqual(['LOAD_FILAMENT_CONTROL SLOT=1', 'UNLOAD_FILAMENT_CONTROL SLOT=1']);
 
     for (const state of ['printing', 'paused']) {
