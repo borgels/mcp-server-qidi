@@ -284,7 +284,8 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
         const klipperHeater = { nozzle: 'extruder', bed: 'heater_bed', chamber: 'chamber' } as const;
         const limitKey = { nozzle: 'extruder', bed: 'heater_bed', chamber: 'chamber' } as const;
         const limit = temperatureLimits()[limitKey[args.heater]];
-        if (args.target > limit) {
+        // Written as !(<=) so that a non-numeric limit refuses instead of allowing every target.
+        if (!(args.target <= limit)) {
           throw new PrinterStateError(`${args.heater} target ${args.target} °C is above the remote limit of ${limit} °C`);
         }
         const target = Math.round(args.target);
@@ -411,7 +412,7 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
         }
 
         const maxAge = plateCheckMaxAgeMs();
-        if (lastSnapshotAt === undefined || now() - lastSnapshotAt > maxAge) {
+        if (lastSnapshotAt === undefined || !(now() - lastSnapshotAt <= maxAge)) {
           throw new PrinterStateError(
             `No webcam snapshot in the last ${maxAge / 60_000} min. Take qidi_snapshot (light=true), check that the plate is empty, then try again.`,
           );

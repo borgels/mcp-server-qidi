@@ -1,4 +1,8 @@
 import { MoonrakerHttpError } from '../errors.js';
+import { requestTimeoutMs } from './policy.js';
+
+/** Error bodies are read up to this many bytes. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
 
 export interface MoonrakerClientOptions {
   /** Moonraker base URL, e.g. http://printer.lan:7125 */
@@ -18,9 +22,9 @@ export interface Snapshot {
 
 /**
  * Thin client for the printer's Moonraker API. Moonraker on the QIDI Plus5
- * trusts every LAN client, so there is no credential here: the only thing
- * that keeps the printer private is the network path (WireGuard, scoped to
- * the printer's address) and the gateway in front of this server.
+ * trusts every LAN client by default, so unless QIDI_MOONRAKER_API_KEY is set
+ * the printer's privacy rests on the network path and on whatever
+ * authenticates callers in front of this server.
  */
 export class MoonrakerClient {
   readonly baseUrl: string;
@@ -34,7 +38,7 @@ export class MoonrakerClient {
     this.snapshotUrl =
       options.snapshotUrl ?? process.env.QIDI_SNAPSHOT_URL ?? `${new URL(this.baseUrl).origin.replace(/:\d+$/, '')}/webcam/?action=snapshot`;
     this.apiKey = options.apiKey ?? (process.env.QIDI_MOONRAKER_API_KEY || undefined);
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.QIDI_TIMEOUT_MS ?? 10_000);
+    this.timeoutMs = options.timeoutMs ?? requestTimeoutMs();
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -63,9 +67,13 @@ export class MoonrakerClient {
   async snapshot(): Promise<Snapshot> {
     const response = await this.fetchImpl(this.snapshotUrl, {
       headers: this.apiKey ? { 'x-api-key': this.apiKey } : {},
+      // The API key must not follow a redirect to another host; without a key there is nothing to leak.
+      redirect: this.apiKey ? 'manual' : 'follow',
       signal: AbortSignal.timeout(this.timeoutMs) });
+    this.assertNotRedirect(response, 'webcam snapshot');
     if (!response.ok) {
-      throw new MoonrakerHttpError(response.status, 'webcam snapshot', await response.text().catch(() => ''));
+      const body = await readTextUpTo(response, MAX_ERROR_BODY_BYTES).catch(() => '');
+      throw new MoonrakerHttpError(response.status, 'webcam snapshot', this.redact(body));
     }
     const mimeType = response.headers.get('content-type')?.split(';')[0]?.trim() || 'image/jpeg';
     if (!mimeType.startsWith('image/')) {
@@ -83,9 +91,13 @@ export class MoonrakerClient {
     const response = await this.fetchImpl(url, {
       method,
       headers: { accept: 'application/json', ...(this.apiKey ? { 'x-api-key': this.apiKey } : {}) },
+      // Never follow redirects: X-Api-Key would be re-sent to the redirect target.
+      redirect: 'manual',
       signal: AbortSignal.timeout(this.timeoutMs),
     });
-    const text = await response.text();
+    this.assertNotRedirect(response, path);
+    // Error bodies are capped, and the API key is redacted before the error text is truncated.
+    const text = response.ok ? await response.text() : this.redact(await readTextUpTo(response, MAX_ERROR_BODY_BYTES));
     let payload: unknown = text;
     try {
       payload = text ? JSON.parse(text) : undefined;
@@ -97,4 +109,39 @@ export class MoonrakerClient {
     }
     return (payload as { result?: T } | undefined)?.result as T;
   }
+
+  private assertNotRedirect(response: Response, what: string): void {
+    if (response.status >= 300 && response.status < 400 && response.status !== 304) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new Error(`${what.split('?')[0]} responded with a redirect (HTTP ${response.status}); redirects are not followed`);
+    }
+  }
+
+  /** Removes the configured API key from upstream text. */
+  private redact(text: string): string {
+    return this.apiKey && this.apiKey.length >= 4 ? text.split(this.apiKey).join('[REDACTED]') : text;
+  }
+}
+
+async function readTextUpTo(response: Response, limit: number): Promise<string> {
+  if (!response.body) {
+    return '';
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    if (total + value.byteLength > limit) {
+      chunks.push(value.subarray(0, limit - total));
+      await reader.cancel().catch(() => undefined);
+      break;
+    }
+    chunks.push(value);
+    total += value.byteLength;
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
