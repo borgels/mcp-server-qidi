@@ -284,7 +284,8 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
         const klipperHeater = { nozzle: 'extruder', bed: 'heater_bed', chamber: 'chamber' } as const;
         const limitKey = { nozzle: 'extruder', bed: 'heater_bed', chamber: 'chamber' } as const;
         const limit = temperatureLimits()[limitKey[args.heater]];
-        if (args.target > limit) {
+        // Written as !(<=) so that a non-numeric limit refuses instead of allowing every target.
+        if (!(args.target <= limit)) {
           throw new PrinterStateError(`${args.heater} target ${args.target} °C is above the remote limit of ${limit} °C`);
         }
         const target = Math.round(args.target);
@@ -411,14 +412,23 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
         }
 
         const maxAge = plateCheckMaxAgeMs();
-        if (lastSnapshotAt === undefined || now() - lastSnapshotAt > maxAge) {
+        if (lastSnapshotAt === undefined || !(now() - lastSnapshotAt <= maxAge)) {
           throw new PrinterStateError(
             `No webcam snapshot in the last ${maxAge / 60_000} min. Take qidi_snapshot (light=true), check that the plate is empty, then try again.`,
           );
         }
-        const lastJob = await client.get<{ jobs: Array<{ end_time?: number | null }> }>('/server/history/list', { limit: 1, order: 'desc' });
-        const lastEnd = Number(lastJob?.jobs?.[0]?.end_time ?? 0) * 1000;
-        if (lastEnd && lastSnapshotAt < lastEnd) {
+        const lastJob = await client.get<{ jobs?: unknown }>('/server/history/list', { limit: 1, order: 'desc' });
+        // Fail closed: a history or end time that cannot be read must not skip the check.
+        const jobs = lastJob?.jobs;
+        if (!Array.isArray(jobs)) {
+          throw new PrinterStateError('The print history could not be read, so the plate check cannot be confirmed. Try again later.');
+        }
+        const rawEnd = (jobs[0] as { end_time?: unknown } | undefined)?.end_time;
+        if (rawEnd !== undefined && rawEnd !== null && (typeof rawEnd !== 'number' || !Number.isFinite(rawEnd) || rawEnd < 0)) {
+          throw new PrinterStateError('The end time of the previous job could not be read, so the plate check cannot be confirmed.');
+        }
+        const lastEnd = (typeof rawEnd === 'number' ? rawEnd : 0) * 1000;
+        if (lastEnd > 0 && !(lastSnapshotAt >= lastEnd)) {
           throw new PrinterStateError('The last snapshot is older than the end of the previous job. Take a new qidi_snapshot and check the plate.');
         }
 
