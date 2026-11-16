@@ -1,1 +1,1 @@
-contact someone@gmail.com
+contact <maintainer>
