@@ -5,11 +5,23 @@ import { formatUnknownError, PrinterStateError } from '../errors.js';
 import { writeAuditEvent } from '../qidi/audit.js';
 import type { MoonrakerClient } from '../qidi/client.js';
 import {
+  dryMaxForType,
+  FILAMENT_LIST_FILE,
+  type FilamentList,
+  findFilament,
+  findVendor,
+  parseFilamentList,
+  UNKNOWN_FILAMENT_DRY_MAX,
+} from '../qidi/filament.js';
+import {
+  boxDryMaxTemp,
   checkToolPolicy,
   controlEnabled,
   plateCheckMaxAgeMs,
   printStartEnabled,
+  maxUploadBytes,
   temperatureLimits,
+  uploadAllowedHosts,
 } from '../qidi/policy.js';
 
 export interface QidiToolContext {
@@ -94,6 +106,8 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
           controlEnabled: controlEnabled(),
           printStartEnabled: printStartEnabled(),
           temperatureLimits: temperatureLimits(),
+          boxDryMaxTemp: boxDryMaxTemp(),
+          uploadAllowedHosts: uploadAllowedHosts(),
           plateCheckMaxAgeMinutes: plateCheckMaxAgeMs() / 60_000,
         });
       }),
@@ -388,6 +402,185 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
       }),
   );
 
+  // --- QIDI Box ------------------------------------------------------------
+
+  server.registerTool(
+    'qidi_box_set_slot',
+    {
+      title: 'Set QIDI Box slot',
+      description:
+        "Correct what the printer thinks is in a QIDI Box slot: vendor, material and colour. Material and vendor must match QIDI's filament list on the printer " +
+        '(e.g. "PLA Basic", "PETG Basic", "ASA"; vendor "QIDI" or "Generic"); an unknown name is refused and the error lists the valid ones. ' +
+        'Keep this right: qidi_box_drying derives its temperature limit from the material in the slots.',
+      inputSchema: {
+        slot: slotInput,
+        vendor: z.string().trim().min(1).max(60),
+        material: z.string().trim().min(1).max(60).describe('Filament name from QIDI\'s list, e.g. "PLA Basic".'),
+        color: z
+          .string()
+          .trim()
+          .regex(/^#?[0-9A-Fa-f]{6}$/, 'Colour as hex RRGGBB, e.g. #FF0000')
+          .describe('Hex colour, e.g. "#1353AB".'),
+      },
+      annotations: CONTROL,
+    },
+    async args =>
+      run('qidi_box_set_slot', args, async () => {
+        await requireCommand(client, ['UPDATE_FILAMENT_INFORMATION']);
+        const slot = await requireSlot(client, args.slot);
+        const list = await filamentList(client);
+        const filament = findFilament(list, args.material);
+        if (!filament) {
+          throw new PrinterStateError(
+            `"${args.material}" is not in QIDI's filament list. Valid materials: ${list.filaments.map(f => f.name).join(', ')}.`,
+          );
+        }
+        const vendor = list.vendors.length ? findVendor(list, args.vendor) : args.vendor;
+        if (!vendor) {
+          throw new PrinterStateError(`Vendor "${args.vendor}" is not in QIDI's list. Valid vendors: ${list.vendors.join(', ')}.`);
+        }
+        assertQuotable(vendor);
+        assertQuotable(filament.name);
+        const color = args.color.replace(/^#/, '').toUpperCase();
+        await client.gcode(`UPDATE_FILAMENT_INFORMATION SLOT=${slot.index} COLOR='${color}' VENDOR='${vendor}' FILAMENT='${filament.name}'`);
+        return json({ slot: slot.name, vendor, material: filament.name, type: filament.type, color: `#${color}` });
+      }),
+  );
+
+  server.registerTool(
+    'qidi_box_drying',
+    {
+      title: 'QIDI Box drying',
+      description:
+        'Start or stop drying in a QIDI Box. The server caps the temperature by the filament in the box: 55 °C when any PLA/PVA/TPU is in it, ' +
+        `65 °C for PETG, ABS, ASA, PC, PA and similar, ${UNKNOWN_FILAMENT_DRY_MAX} °C for anything it does not recognise, never above QIDI_MAX_BOX_DRY_TEMP. ` +
+        'A request above the cap is refused, not lowered. The cap follows the slot setup, so fix wrong slots with qidi_box_set_slot first.',
+      inputSchema: {
+        action: z.enum(['start', 'stop']),
+        box: z.number().int().min(1).max(4).default(1).describe('Box number, as qidi_box_status reports it.'),
+        temperature: z.number().int().min(30).max(90).optional().describe('°C. Required for start.'),
+        hours: z.number().int().min(1).max(24).optional().describe('Drying time in whole hours. Required for start.'),
+      },
+      annotations: CONTROL,
+    },
+    async args =>
+      run('qidi_box_drying', args, async () => {
+        const status = await boxStatus(client);
+        const box = status.boxes.find(b => b.box === args.box);
+        if (!box) throw new PrinterStateError(`Box ${args.box} is not connected. Online boxes: ${status.boxes.map(b => b.box).join(', ') || 'none'}.`);
+
+        if (args.action === 'stop') {
+          await requireCommand(client, ['DISABLE_BOX_DRY']);
+          await client.gcode(`DISABLE_BOX_DRY BOX=${args.box}`);
+          return text(`Drying stopped in box ${args.box}.`);
+        }
+
+        if (args.temperature === undefined || args.hours === undefined) {
+          throw new PrinterStateError('Starting drying needs both temperature and hours.');
+        }
+        const limit = dryLimit(box.slots);
+        if (!(args.temperature <= limit.max)) {
+          throw new PrinterStateError(
+            `${args.temperature} °C is above the drying limit of ${limit.max} °C for box ${args.box} (${limit.reason}). Nothing was started.`,
+          );
+        }
+        await requireCommand(client, ['ENABLE_BOX_DRY']);
+        await client.gcode(`ENABLE_BOX_DRY BOX=${args.box} TEMP=${args.temperature} END_TIME=${args.hours}`);
+        const heater = await client
+          .queryObjects({ [`heater_generic heater_box${args.box}`]: ['target', 'temperature'] })
+          .then(s => s[`heater_generic heater_box${args.box}`])
+          .catch(() => undefined);
+        return json({
+          box: args.box,
+          drying: true,
+          target: args.temperature,
+          hours: args.hours,
+          limit: limit.max,
+          limitReason: limit.reason,
+          heaterTargetNow: heater ? round(heater.target) : undefined,
+          heaterTemperatureNow: heater ? round(heater.temperature) : undefined,
+        });
+      }),
+  );
+
+  for (const [tool, verb, commands] of [
+    ['qidi_box_load', 'load', ['LOAD_FILAMENT_CONTROL', 'E_LOAD']],
+    ['qidi_box_unload', 'unload', ['UNLOAD_FILAMENT_CONTROL', 'E_UNLOAD']],
+  ] as const) {
+    server.registerTool(
+      tool,
+      {
+        title: verb === 'load' ? 'Load filament from QIDI Box' : 'Unload filament to QIDI Box',
+        description:
+          (verb === 'load'
+            ? 'Load the filament from a QIDI Box slot into the toolhead (heats, cuts and unloads the current filament first). '
+            : 'Unload the filament of a QIDI Box slot from the toolhead back into the Box. ') +
+          'Refused while a print is running or paused. The change takes ~2-3 minutes; the tool returns once the printer accepted it — check qidi_box_status afterwards.',
+        inputSchema: { slot: slotInput },
+        annotations: CONTROL,
+      },
+      async args =>
+        run(tool, args, async () => {
+          const stats = await printStats(client);
+          if (stats.state === 'printing' || stats.state === 'paused') {
+            throw new PrinterStateError(`Printer is ${stats.state}${stats.filename ? ` (${stats.filename})` : ''}; filament cannot be ${verb}ed during a print.`);
+          }
+          const slot = await requireSlot(client, args.slot);
+          if (verb === 'load' && !slot.filamentInserted) {
+            throw new PrinterStateError(`${slot.name} has no filament inserted.`);
+          }
+          const command = await requireCommand(client, commands);
+          const finished = await acceptLongCommand(client, `${command} SLOT=${slot.index}`, async error => {
+            await writeAuditEvent({ tool, actingAs, action: 'error', args, status: 'error', error });
+          });
+          return text(
+            finished
+              ? `${verb === 'load' ? 'Loaded' : 'Unloaded'} ${slot.name}.`
+              : `${verb === 'load' ? 'Loading' : 'Unloading'} ${slot.name} started; it takes a few minutes. Check qidi_box_status / qidi_console afterwards.`,
+          );
+        }),
+    );
+  }
+
+  server.registerTool(
+    'qidi_upload_file',
+    {
+      title: 'Upload G-code',
+      description:
+        'Put a sliced G-code file on the printer (it is not started; use qidi_start_print for that). Give either the G-code text in `content`, ' +
+        'or an https `url` on a host the server allows (QIDI_UPLOAD_ALLOWED_HOSTS). Refuses to replace an existing file unless overwrite=true, and never replaces the file being printed.',
+      inputSchema: {
+        filename: fileName.refine(name => /\.gcode$/i.test(name), 'File name must end in .gcode'),
+        content: z.string().min(1).optional().describe('The G-code text.'),
+        url: z.url().optional().describe('https URL to download the G-code from.'),
+        overwrite: z.boolean().default(false),
+      },
+      annotations: CONTROL,
+    },
+    async args =>
+      run('qidi_upload_file', args, async () => {
+        if ((args.content === undefined) === (args.url === undefined)) {
+          throw new PrinterStateError('Give exactly one of content or url.');
+        }
+        const files = await client.get<Array<{ path: string }>>('/server/files/list', { root: 'gcodes' });
+        const exists = (files ?? []).some(file => file.path === args.filename);
+        if (exists) {
+          const stats = await printStats(client);
+          if ((stats.state === 'printing' || stats.state === 'paused') && stats.filename === args.filename) {
+            throw new PrinterStateError(`${args.filename} is the job being printed; it cannot be replaced now.`);
+          }
+          if (!args.overwrite) throw new PrinterStateError(`${args.filename} already exists on the printer. Pass overwrite=true to replace it.`);
+        }
+
+        const data = args.content !== undefined ? new TextEncoder().encode(args.content) : await download(args.url!);
+        if (data.byteLength > maxUploadBytes()) {
+          throw new PrinterStateError(`File is ${Math.round(data.byteLength / 1024 / 1024)} MB, above the ${maxUploadBytes() / 1024 / 1024} MB limit.`);
+        }
+        await client.upload(args.filename, data);
+        return json({ uploaded: args.filename, sizeKb: Math.round(data.byteLength / 1024), replaced: exists });
+      }),
+  );
+
   // --- print --------------------------------------------------------------
 
   server.registerTool(
@@ -537,6 +730,102 @@ async function boxStatus(client: MoonrakerClient) {
       })),
     }));
   return { loadedSlot: extras.loaded_slot, boxes };
+}
+
+interface SlotInfo {
+  slot: string;
+  filamentInserted: boolean;
+  material?: unknown;
+  type?: unknown;
+}
+
+/** Highest drying temperature allowed for a box, from the filament inserted in its slots. */
+export function dryLimit(slots: SlotInfo[]): { max: number; reason: string } {
+  const ceiling = boxDryMaxTemp();
+  let max = ceiling;
+  let reason = `server ceiling QIDI_MAX_BOX_DRY_TEMP=${ceiling} °C`;
+  for (const slot of slots.filter(s => s.filamentInserted)) {
+    const type = typeof slot.type === 'string' && slot.type ? slot.type : typeof slot.material === 'string' ? slot.material : undefined;
+    const slotMax = dryMaxForType(type);
+    if (slotMax < max) {
+      max = slotMax;
+      reason = `${slot.slot} holds ${type ?? 'unknown filament'}`;
+    }
+  }
+  return { max, reason };
+}
+
+/** Slot as "slot3" (as qidi_box_status reports it) or 3. */
+const slotInput = z
+  .union([z.number().int().min(0).max(15), z.string().trim().regex(/^slot\d{1,2}$/i, 'Slot as "slot0".."slot15"')])
+  .transform(value => (typeof value === 'number' ? value : Number(value.slice(4))))
+  .refine(n => n >= 0 && n <= 15, 'Slot must be slot0..slot15')
+  .describe('Box slot, as qidi_box_status names it ("slot0" = box 1 slot 1, "slot4" = box 2 slot 1).');
+
+async function requireSlot(client: MoonrakerClient, index: number) {
+  const status = await boxStatus(client);
+  const name = `slot${index}`;
+  const slot = status.boxes.flatMap(box => box.slots).find(s => s.slot === name);
+  if (!slot) throw new PrinterStateError(`${name} is not in a connected QIDI Box.`);
+  return { ...slot, index, name };
+}
+
+/** First of `names` the printer's Klipper knows, so we never send a command QIDI's firmware lacks. */
+async function requireCommand(client: MoonrakerClient, names: readonly string[]): Promise<string> {
+  const known = await client.gcodeCommands();
+  const found = names.find(name => known.has(name));
+  if (!found) throw new PrinterStateError(`This printer firmware has no ${names.join(' / ')} command.`);
+  return found;
+}
+
+async function filamentList(client: MoonrakerClient): Promise<FilamentList> {
+  const list = parseFilamentList(await client.fileText('config', FILAMENT_LIST_FILE));
+  if (!list.filaments.length) throw new Error(`${FILAMENT_LIST_FILE} on the printer lists no filaments`);
+  return list;
+}
+
+/** Values go between single quotes in G-code. */
+function assertQuotable(value: string): void {
+  if (/['\r\n]/.test(value)) throw new PrinterStateError(`"${value}" cannot be sent to the printer (quote or line break).`);
+}
+
+/** How long a long-running command gets to fail fast before we report it as started. */
+const ACCEPT_WINDOW_MS = 5_000;
+
+/**
+ * Run a G-code command that takes minutes (a filament change). Moonraker answers
+ * only when it is done, so wait briefly for an immediate rejection, then return
+ * false ("still running") and hand any later failure to `onLateError`.
+ */
+async function acceptLongCommand(client: MoonrakerClient, script: string, onLateError: (error: unknown) => Promise<void>): Promise<boolean> {
+  const pending = client.gcode(script, { timeoutMs: 10 * 60_000 });
+  let timer: NodeJS.Timeout | undefined;
+  const window = new Promise<'running'>(resolve => {
+    timer = setTimeout(() => resolve('running'), ACCEPT_WINDOW_MS);
+  });
+  try {
+    const outcome = await Promise.race([pending.then(() => 'done' as const), window]);
+    if (outcome === 'running') pending.catch(error => onLateError(error).catch(() => undefined));
+    return outcome === 'done';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function download(url: string): Promise<Uint8Array<ArrayBuffer>> {
+  const parsed = new URL(url);
+  const allowed = uploadAllowedHosts();
+  if (parsed.protocol !== 'https:') throw new PrinterStateError('Only https URLs can be downloaded.');
+  if (!allowed.includes(parsed.hostname.toLowerCase())) {
+    throw new PrinterStateError(
+      allowed.length ? `${parsed.hostname} is not in QIDI_UPLOAD_ALLOWED_HOSTS (${allowed.join(', ')}).` : 'URL uploads are off (QIDI_UPLOAD_ALLOWED_HOSTS is empty); pass content instead.',
+    );
+  }
+  const response = await fetch(parsed, { redirect: 'error', signal: AbortSignal.timeout(120_000) });
+  if (!response.ok) throw new Error(`Download failed with HTTP ${response.status}`);
+  const length = Number(response.headers.get('content-length') ?? 0);
+  if (length > maxUploadBytes()) throw new PrinterStateError(`File is larger than the ${maxUploadBytes() / 1024 / 1024} MB limit.`);
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 function fileSummary(meta: Record<string, unknown> | undefined) {

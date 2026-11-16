@@ -27,6 +27,10 @@ printer's address) and on whatever authenticates callers in front of this server
 | `qidi_pause_print` / `qidi_resume_print` | control | |
 | `qidi_cancel_print` | control | Must name the running file, so a stale conversation cannot cancel the wrong job. |
 | `qidi_emergency_stop` / `qidi_firmware_restart` | control | M112 and recovery. Restart is refused while printing. |
+| `qidi_box_set_slot` | control | Vendor, material and colour of a Box slot. Material and vendor must be in QIDI's filament list on the printer (`officiall_filas_list.cfg`). |
+| `qidi_box_drying` | control | Start/stop drying a Box. Temperature is capped by the filament in it (see below). |
+| `qidi_box_load` / `qidi_box_unload` | control | Load a slot into the toolhead / unload it. Refused while printing or paused. |
+| `qidi_upload_file` | control | Put a sliced `.gcode` on the printer (inline text, or https from an allowed host). Never replaces the file being printed; other files only with `overwrite=true`. |
 | `qidi_start_print` | print | Start a file already on the printer. See the plate check below. |
 
 There is deliberately **no raw G-code tool**: every command sent to the printer
@@ -46,6 +50,18 @@ Nobody is standing next to the printer when a print is started from an MCP clien
 
 A snapshot is good for one start.
 
+### Box drying limit
+
+`qidi_box_drying` refuses (does not lower) a temperature above the limit for
+that box: the lowest limit among the slots with filament inserted, by filament
+type — 55 °C for PLA, PVA and TPU, 65 °C for PETG, PET, ABS, ASA, PC, PA and
+PPS, 50 °C for anything unrecognised — and never above `QIDI_MAX_BOX_DRY_TEMP`.
+The limit is only as good as the slot setup, so correct a wrong slot with
+`qidi_box_set_slot` first. Drying started from the touchscreen is not covered.
+
+Each Box tool checks Klipper's command list first, so a firmware without the
+command fails with a clear message instead of an unknown-command error.
+
 ## Configuration
 
 | Env var | Default | |
@@ -53,10 +69,13 @@ A snapshot is good for one start.
 | `QIDI_MOONRAKER_URL` | `http://localhost:7125` | Moonraker base URL. |
 | `QIDI_SNAPSHOT_URL` | `<host>/webcam/?action=snapshot` | mjpeg-streamer snapshot. |
 | `QIDI_MOONRAKER_API_KEY` | — | Sent as `X-Api-Key`. Set it and remove the server's address range from Moonraker's `trusted_clients`, so only this container can drive the printer. |
-| `QIDI_ENABLE_CONTROL` | `false` | Light, temperatures, pause/resume/cancel, e-stop, restart. |
+| `QIDI_ENABLE_CONTROL` | `false` | Light, temperatures, pause/resume/cancel, e-stop, restart, Box tools, upload. |
 | `QIDI_ENABLE_PRINT_START` | `false` | `qidi_start_print`. |
 | `QIDI_MAX_NOZZLE_TEMP` / `_BED_TEMP` / `_CHAMBER_TEMP` | 300 / 110 / 65 | Remote target caps (°C), integers 0-400. |
 | `QIDI_PLATE_CHECK_MAX_AGE_MIN` | `15` | Snapshot freshness for a start, integer minutes 1-1440. |
+| `QIDI_MAX_BOX_DRY_TEMP` | `65` | Ceiling for Box drying, integer °C 30-90, on top of the per-filament limit. |
+| `QIDI_UPLOAD_ALLOWED_HOSTS` | — | Comma-separated hosts `qidi_upload_file` may download from (https). Empty = URL uploads off. |
+| `QIDI_MAX_UPLOAD_MB` | `100` | Largest G-code upload, integer MB 1-1024. Inline uploads are also bounded by `MCP_MAX_BODY_BYTES`. |
 | `QIDI_TIMEOUT_MS` | `10000` | Per-request timeout. |
 | `QIDI_AUDIT_LOG` | — | JSONL audit log (who did what; Moonraker logs everything as `_TRUSTED_USER_`). |
 | `QIDI_TRUST_FORWARDED_USER` | `false` | Trust `X-MCP-User` from an authenticating gateway. Requires `MCP_HTTP_TOKEN`. |

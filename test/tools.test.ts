@@ -18,7 +18,29 @@ interface PrinterFake {
   filename: string;
   lastJobEnd: number; // epoch seconds
   history?: unknown; // overrides the history/list result
+  /** Filament type per slot of box 1; null = empty slot. */
+  slots?: Array<string | null>;
+  gcodeCommands?: string[];
+  files?: string[];
 }
+
+const FILAMENT_LIST = [
+  '[fila7]',
+  'filament = PLA Basic',
+  'type = PLA',
+  'min_temp = 190',
+  '[fila39]',
+  'filament = PETG Basic',
+  'type = PETG',
+  '[fila18]',
+  'filament = ASA',
+  'type = ASA',
+  '[vendor_list]',
+  '0 = Generic',
+  '1 = QIDI',
+].join('\n');
+
+const DEFAULT_COMMANDS = ['UPDATE_FILAMENT_INFORMATION', 'ENABLE_BOX_DRY', 'DISABLE_BOX_DRY', 'LOAD_FILAMENT_CONTROL', 'UNLOAD_FILAMENT_CONTROL'];
 
 function fakePrinter(printer: PrinterFake) {
   const seen: Seen[] = [];
@@ -38,9 +60,25 @@ function fakePrinter(printer: PrinterFake) {
           extruder: { temperature: 250.04, target: 250 },
           heater_bed: { temperature: 80, target: 80 },
           'heater_generic chamber': { temperature: 40, target: 0 },
+          'heater_generic heater_box1': { temperature: 30, target: 0 },
+          box_extras: {
+            loaded_slot: 'slot0',
+            boxes: [
+              {
+                is_online: 1,
+                ...Object.fromEntries((printer.slots ?? []).map((type, i) => [`filament_inserted_${i}`, type ? 1 : 0])),
+                filament_info: (printer.slots ?? []).map(type => ({ filament_type: type ?? 'PLA', filament_str: type ?? 'PLA Basic', vendor_str: 'QIDI' })),
+              },
+            ],
+          },
         },
       });
     }
+    if (url.pathname === '/printer/gcode/help') {
+      return ok(Object.fromEntries((printer.gcodeCommands ?? DEFAULT_COMMANDS).map(name => [name, 'help'])));
+    }
+    if (url.pathname === '/server/files/config/officiall_filas_list.cfg') return new Response(FILAMENT_LIST);
+    if (url.pathname === '/server/files/list') return ok((printer.files ?? []).map(path => ({ path, modified: 0, size: 1 })));
     if (url.pathname === '/server/history/list') return ok(printer.history !== undefined ? printer.history : { count: 1, jobs: [{ end_time: printer.lastJobEnd }] });
     if (url.pathname === '/server/files/metadata') {
       if (url.searchParams.get('filename') === 'missing.gcode') return new Response(JSON.stringify({ error: { message: 'Metadata not available' } }), { status: 404 });
@@ -239,6 +277,81 @@ describe('qidi tools', () => {
     const { call } = await connect({ state: 'standby', filename: '', lastJobEnd: 0 }, now);
     const result = await call('qidi_file_metadata', { filename: '../config/printer.cfg' });
     expect(result.isError).toBe(true);
+  });
+});
+
+describe('qidi box tools', () => {
+  const now = () => T0;
+  beforeEach(() => vi.stubEnv('QIDI_ENABLE_CONTROL', 'true'));
+  afterEach(() => vi.unstubAllEnvs());
+  const scripts = (seen: Seen[]) => seen.filter(s => s.path === '/printer/gcode/script').map(s => s.query.get('script'));
+
+  it("sets a slot with names from QIDI's filament list", async () => {
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PLA', null, null, null] }, now);
+    const result = await call('qidi_box_set_slot', { slot: 'slot1', vendor: 'qidi', material: 'petg basic', color: '#1353ab' });
+    expect(result.isError).toBeFalsy();
+    expect(scripts(seen)).toEqual(["UPDATE_FILAMENT_INFORMATION SLOT=1 COLOR='1353AB' VENDOR='QIDI' FILAMENT='PETG Basic'"]);
+  });
+
+  it('refuses a material that is not in the list', async () => {
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PLA', null, null, null] }, now);
+    const result = await call('qidi_box_set_slot', { slot: 0, vendor: 'QIDI', material: "PLA' ; M112", color: 'FF0000' });
+    expect(result.isError).toBe(true);
+    expect(result.text).toMatch(/PLA Basic/);
+    expect(scripts(seen)).toEqual([]);
+  });
+
+  it('caps drying at 55 °C when PLA is in the box', async () => {
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PETG', 'PLA', null, null] }, now);
+    const tooHot = await call('qidi_box_drying', { action: 'start', box: 1, temperature: 65, hours: 6 });
+    expect(tooHot.isError).toBe(true);
+    expect(tooHot.text).toMatch(/55 °C.*slot1 holds PLA/);
+    const ok = await call('qidi_box_drying', { action: 'start', box: 1, temperature: 55, hours: 6 });
+    expect(ok.isError).toBeFalsy();
+    expect(scripts(seen)).toEqual(['ENABLE_BOX_DRY BOX=1 TEMP=55 END_TIME=6']);
+  });
+
+  it('allows 65 °C for PETG and ASA, and stops drying', async () => {
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PETG', 'ASA', null, null] }, now);
+    expect((await call('qidi_box_drying', { action: 'start', temperature: 65, hours: 4 })).isError).toBeFalsy();
+    expect((await call('qidi_box_drying', { action: 'start', temperature: 70, hours: 4 })).isError).toBe(true);
+    await call('qidi_box_drying', { action: 'stop' });
+    expect(scripts(seen)).toEqual(['ENABLE_BOX_DRY BOX=1 TEMP=65 END_TIME=4', 'DISABLE_BOX_DRY BOX=1']);
+  });
+
+  it('treats unknown filament conservatively', async () => {
+    const { call } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['Mystery', null, null, null] }, now);
+    expect((await call('qidi_box_drying', { action: 'start', temperature: 55, hours: 4 })).isError).toBe(true);
+  });
+
+  it('loads and unloads only when no print is running', async () => {
+    const idle = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PLA', 'PETG', null, null] }, now);
+    expect((await idle.call('qidi_box_load', { slot: 'slot1' })).isError).toBeFalsy();
+    expect((await idle.call('qidi_box_unload', { slot: 'slot1' })).isError).toBeFalsy();
+    expect((await idle.call('qidi_box_load', { slot: 'slot2' })).text).toMatch(/no filament/);
+    expect(scripts(idle.seen)).toEqual(['LOAD_FILAMENT_CONTROL SLOT=1', 'UNLOAD_FILAMENT_CONTROL SLOT=1']);
+
+    for (const state of ['printing', 'paused']) {
+      const busy = await connect({ state, filename: 'a.gcode', lastJobEnd: 0, slots: ['PLA', 'PETG', null, null] }, now);
+      const result = await busy.call('qidi_box_load', { slot: 1 });
+      expect(result.isError).toBe(true);
+      expect(scripts(busy.seen)).toEqual([]);
+    }
+  });
+
+  it('falls back to the older E_LOAD firmware command', async () => {
+    const { call, seen } = await connect({ state: 'standby', filename: '', lastJobEnd: 0, slots: ['PLA', null, null, null], gcodeCommands: ['E_LOAD'] }, now);
+    await call('qidi_box_load', { slot: 0 });
+    expect(scripts(seen)).toEqual(['E_LOAD SLOT=0']);
+  });
+
+  it('uploads G-code but does not overwrite without asking', async () => {
+    const { call, seen } = await connect({ state: 'printing', filename: 'a.gcode', lastJobEnd: 0, files: ['a.gcode', 'b.gcode'] }, now);
+    expect((await call('qidi_upload_file', { filename: 'new.gcode', content: 'G28\n' })).isError).toBeFalsy();
+    expect((await call('qidi_upload_file', { filename: 'b.gcode', content: 'G28\n' })).text).toMatch(/overwrite=true/);
+    expect((await call('qidi_upload_file', { filename: 'a.gcode', content: 'G28\n', overwrite: true })).text).toMatch(/being printed/);
+    expect((await call('qidi_upload_file', { filename: 'c.gcode', url: 'https://evil.example/x.gcode' })).text).toMatch(/URL uploads are off/);
+    expect(seen.filter(s => s.path === '/server/files/upload')).toHaveLength(1);
   });
 });
 
