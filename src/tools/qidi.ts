@@ -419,7 +419,8 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
         }
         const lastJob = await client.get<{ jobs: Array<{ end_time?: number | null }> }>('/server/history/list', { limit: 1, order: 'desc' });
         const lastEnd = Number(lastJob?.jobs?.[0]?.end_time ?? 0) * 1000;
-        if (lastEnd && lastSnapshotAt < lastEnd) {
+        // Fail closed: an end time that is not a number must not skip the check.
+        if (!Number.isFinite(lastEnd) || (lastEnd > 0 && !(lastSnapshotAt >= lastEnd))) {
           throw new PrinterStateError('The last snapshot is older than the end of the previous job. Take a new qidi_snapshot and check the plate.');
         }
 

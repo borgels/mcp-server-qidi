@@ -3,6 +3,8 @@ import { requestTimeoutMs } from './policy.js';
 
 /** Error bodies are read up to this many bytes. */
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
+/** Redirect hops followed for the webcam snapshot (e.g. `/webcam?x` -> `/webcam/?x`). */
+const MAX_SNAPSHOT_REDIRECTS = 2;
 
 export interface MoonrakerClientOptions {
   /** Moonraker base URL, e.g. http://printer.lan:7125 */
@@ -65,12 +67,36 @@ export class MoonrakerClient {
   }
 
   async snapshot(): Promise<Snapshot> {
-    const response = await this.fetchImpl(this.snapshotUrl, {
-      headers: this.apiKey ? { 'x-api-key': this.apiKey } : {},
-      // The API key must not follow a redirect to another host; without a key there is nothing to leak.
-      redirect: this.apiKey ? 'manual' : 'follow',
-      signal: AbortSignal.timeout(this.timeoutMs) });
-    this.assertNotRedirect(response, 'webcam snapshot');
+    const signal = AbortSignal.timeout(this.timeoutMs);
+    let url = new URL(this.snapshotUrl);
+    let response: Response;
+    // Redirects are followed by hand: at most MAX_SNAPSHOT_REDIRECTS hops, and with an
+    // API key only on the same origin, so the key is never sent to another host.
+    for (let hops = 0; ; hops += 1) {
+      response = await this.fetchImpl(url, {
+        headers: this.apiKey ? { 'x-api-key': this.apiKey } : {},
+        redirect: 'manual',
+        signal,
+      });
+      if (!isRedirect(response.status)) {
+        break;
+      }
+      void response.body?.cancel().catch(() => undefined);
+      const location = response.headers.get('location');
+      let next: URL | undefined;
+      try {
+        next = location ? new URL(location, url) : undefined;
+      } catch {
+        next = undefined;
+      }
+      if (!next || hops >= MAX_SNAPSHOT_REDIRECTS || (this.apiKey && next.origin !== url.origin)) {
+        throw new Error(
+          `webcam snapshot responded with a redirect (HTTP ${response.status}) that is not followed ` +
+            `(only ${MAX_SNAPSHOT_REDIRECTS} hops${this.apiKey ? ' on the same origin' : ''} are)`,
+        );
+      }
+      url = next;
+    }
     if (!response.ok) {
       const body = await readTextUpTo(response, MAX_ERROR_BODY_BYTES).catch(() => '');
       throw new MoonrakerHttpError(response.status, 'webcam snapshot', this.redact(body));
@@ -111,7 +137,7 @@ export class MoonrakerClient {
   }
 
   private assertNotRedirect(response: Response, what: string): void {
-    if (response.status >= 300 && response.status < 400 && response.status !== 304) {
+    if (isRedirect(response.status)) {
       void response.body?.cancel().catch(() => undefined);
       throw new Error(`${what.split('?')[0]} responded with a redirect (HTTP ${response.status}); redirects are not followed`);
     }
@@ -121,6 +147,10 @@ export class MoonrakerClient {
   private redact(text: string): string {
     return this.apiKey && this.apiKey.length >= 4 ? text.split(this.apiKey).join('[REDACTED]') : text;
   }
+}
+
+function isRedirect(status: number): boolean {
+  return status >= 300 && status < 400 && status !== 304;
 }
 
 async function readTextUpTo(response: Response, limit: number): Promise<string> {

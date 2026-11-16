@@ -127,6 +127,15 @@ describe('qidi tools', () => {
     expect(result.text).toMatch(/previous job/);
   });
 
+  it('refuses to start when the previous job end time is not a number', async () => {
+    const { call, seen } = await connect({ state: 'complete', filename: '', lastJobEnd: 'not-a-time' as unknown as number }, now);
+    await call('qidi_snapshot');
+    time += 60_000;
+    const result = await call('qidi_start_print', { filename: 'part.gcode', plateIsEmpty: true });
+    expect(result.isError).toBe(true);
+    expect(seen.some(s => s.path === '/printer/print/start')).toBe(false);
+  });
+
   it('refuses to start while printing', async () => {
     const { call } = await connect({ state: 'printing', filename: 'other.gcode', lastJobEnd: 0 }, now);
     await call('qidi_snapshot');
@@ -260,6 +269,42 @@ describe('moonraker client safety', () => {
     await expect(client.get('/server/info')).rejects.toThrow(/redirect/);
     await expect(client.snapshot()).rejects.toThrow(/redirect/);
     expect(inits.every(init => init.redirect === 'manual')).toBe(true);
+  });
+
+  it('follows a same-origin webcam redirect with the key, but not a cross-origin one', async () => {
+    const calls: Array<{ url: string; key?: string }> = [];
+    const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, key: (init?.headers as Record<string, string> | undefined)?.['x-api-key'] });
+      if (url === 'http://p/webcam?action=snapshot') {
+        return new Response(null, { status: 301, headers: { location: '/webcam/?action=snapshot' } });
+      }
+      if (url === 'http://p/webcam/?action=snapshot') {
+        return new Response(new Uint8Array([0xff, 0xd8]), { headers: { 'content-type': 'image/jpeg' } });
+      }
+      if (url === 'http://p/cross') {
+        return new Response(null, { status: 302, headers: { location: 'http://elsewhere.example/img.jpg' } });
+      }
+      return new Response(null, { status: 302, headers: { location: url.replace(/\/(\d+)$/, (_m, n) => `/${Number(n) + 1}`) } });
+    }) as unknown as typeof fetch;
+
+    const ok = new MoonrakerClient({ baseUrl: 'http://p:7125', snapshotUrl: 'http://p/webcam?action=snapshot', apiKey: 'k', fetchImpl });
+    const snap = await ok.snapshot();
+    expect(snap.mimeType).toBe('image/jpeg');
+    expect(calls.map(c => [c.url, c.key])).toEqual([
+      ['http://p/webcam?action=snapshot', 'k'],
+      ['http://p/webcam/?action=snapshot', 'k'],
+    ]);
+
+    calls.length = 0;
+    const cross = new MoonrakerClient({ baseUrl: 'http://p:7125', snapshotUrl: 'http://p/cross', apiKey: 'k', fetchImpl });
+    await expect(cross.snapshot()).rejects.toThrow(/redirect/);
+    expect(calls.some(c => c.url.startsWith('http://elsewhere.example'))).toBe(false);
+
+    calls.length = 0;
+    const loop = new MoonrakerClient({ baseUrl: 'http://p:7125', snapshotUrl: 'http://p/hop/1', apiKey: 'k', fetchImpl });
+    await expect(loop.snapshot()).rejects.toThrow(/redirect/);
+    expect(calls).toHaveLength(3);
   });
 
   it('caps error bodies and redacts the API key before truncating', async () => {

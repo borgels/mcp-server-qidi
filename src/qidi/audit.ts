@@ -14,7 +14,7 @@ export interface AuditEvent {
 
 /**
  * Moonraker records every job as `_TRUSTED_USER_`, so this log is the only
- * record of who started, paused or cancelled a print from Claude.
+ * record of who started, paused or cancelled a print from an MCP client.
  */
 export async function writeAuditEvent(event: AuditEvent): Promise<void> {
   const auditPath = process.env.QIDI_AUDIT_LOG;

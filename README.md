@@ -34,7 +34,7 @@ is built from enumerated input.
 
 ### Plate check
 
-Nobody is standing next to the printer when a print is started from Claude.
+Nobody is standing next to the printer when a print is started from an MCP client.
 `qidi_start_print` refuses unless:
 
 1. the printer is idle (`standby`, `complete`, `cancelled` or `error`),
@@ -81,7 +81,9 @@ can never lift a temperature cap or the plate-check age.
 | `MCP_ALLOWED_HOSTS` | localhost names on a loopback bind | Host names accepted in the `Host` header (DNS-rebinding protection). |
 | `MCP_AUTH_FAILURE_LIMIT` / `MCP_AUTH_FAILURE_WINDOW_MS` | `20` / `60000` | Failed authentication attempts per client address before `429`; `0` disables. Valid tokens are never throttled. |
 
-Moonraker and webcam requests that carry the API key never follow HTTP redirects.
+Moonraker API requests never follow HTTP redirects. The webcam snapshot follows at
+most two redirects, and only on the same origin when an API key is set, so the key
+is never sent to another host.
 
 ## Security model
 
