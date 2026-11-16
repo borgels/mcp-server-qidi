@@ -21,7 +21,7 @@ export class PrinterStateError extends Error {
 export function formatUnknownError(error: unknown): string {
   if (error instanceof Error) {
     if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-      return 'Printer did not answer in time (is the printer on and the tunnel up?)';
+      return 'Printer did not answer in time (is the printer on and reachable?)';
     }
     return error.message;
   }

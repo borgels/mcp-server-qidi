@@ -1,3 +1,5 @@
+import { type Env, readEnvInteger } from '../config-env.js';
+
 export type ToolTier = 'read' | 'control' | 'print';
 
 /**
@@ -56,16 +58,42 @@ export interface TemperatureLimits {
   chamber: number;
 }
 
-/** Upper bounds for remote heater targets. Plus5 hardware max is higher; these are what a remote caller may set. */
-export function temperatureLimits(env: NodeJS.ProcessEnv = process.env): TemperatureLimits {
+/** Highest value accepted for any QIDI_MAX_*_TEMP setting (matches the tool's input schema). */
+export const MAX_CONFIGURABLE_TEMP = 400;
+
+/**
+ * Upper bounds for remote heater targets. Plus5 hardware max is higher; these are what a remote caller may set.
+ * Each value must be an integer from 0 to MAX_CONFIGURABLE_TEMP; anything else throws a ConfigError, so a typo
+ * can never turn into NaN (`target > NaN` is false and would allow any target).
+ */
+export function temperatureLimits(env: Env = process.env): TemperatureLimits {
+  const limit = { min: 0, max: MAX_CONFIGURABLE_TEMP };
   return {
-    extruder: Number(env.QIDI_MAX_NOZZLE_TEMP ?? 300),
-    heater_bed: Number(env.QIDI_MAX_BED_TEMP ?? 110),
-    chamber: Number(env.QIDI_MAX_CHAMBER_TEMP ?? 65),
+    extruder: readEnvInteger('QIDI_MAX_NOZZLE_TEMP', 300, limit, env),
+    heater_bed: readEnvInteger('QIDI_MAX_BED_TEMP', 110, limit, env),
+    chamber: readEnvInteger('QIDI_MAX_CHAMBER_TEMP', 65, limit, env),
   };
 }
 
-/** How old the last webcam snapshot may be when a print is started remotely. */
-export function plateCheckMaxAgeMs(env: NodeJS.ProcessEnv = process.env): number {
-  return Number(env.QIDI_PLATE_CHECK_MAX_AGE_MIN ?? 15) * 60_000;
+/**
+ * How old the last webcam snapshot may be when a print is started remotely: an integer number of minutes
+ * from 1 to 1440. Invalid values throw a ConfigError instead of becoming NaN (which would let a stale check pass).
+ */
+export function plateCheckMaxAgeMs(env: Env = process.env): number {
+  return readEnvInteger('QIDI_PLATE_CHECK_MAX_AGE_MIN', 15, { min: 1, max: 1440 }, env) * 60_000;
+}
+
+/** Per-request timeout for Moonraker and the webcam (1 ms to 10 minutes). */
+export function requestTimeoutMs(env: Env = process.env): number {
+  return readEnvInteger('QIDI_TIMEOUT_MS', 10_000, { min: 1, max: 600_000 }, env);
+}
+
+/**
+ * Validates every numeric QIDI_* setting. Called at startup so a bad value stops the server;
+ * the tools also re-read the limits per call and refuse to act when they are invalid.
+ */
+export function validateQidiEnv(env: Env = process.env): void {
+  temperatureLimits(env);
+  plateCheckMaxAgeMs(env);
+  requestTimeoutMs(env);
 }
