@@ -299,7 +299,7 @@ describe('moonraker client safety', () => {
     calls.length = 0;
     const cross = new MoonrakerClient({ baseUrl: 'http://p:7125', snapshotUrl: 'http://p/cross', apiKey: 'k', fetchImpl });
     await expect(cross.snapshot()).rejects.toThrow(/redirect/);
-    expect(calls.some(c => c.url.startsWith('http://elsewhere.example'))).toBe(false);
+    expect(calls.some(c => new URL(c.url).hostname === 'elsewhere.example')).toBe(false);
 
     calls.length = 0;
     const loop = new MoonrakerClient({ baseUrl: 'http://p:7125', snapshotUrl: 'http://p/hop/1', apiKey: 'k', fetchImpl });
