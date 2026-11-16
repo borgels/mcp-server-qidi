@@ -3,7 +3,7 @@
 ## Unreleased
 
 - `qidi_box_set_slot`: vendor, material and colour of a QIDI Box slot, validated against QIDI's filament list on the printer.
-- `qidi_box_drying`: start/stop drying; target capped by the filament inserted in the box (55 °C PLA/PVA/TPU, 65 °C PETG/ABS/ASA/PC/PA, 50 °C unknown) and `QIDI_MAX_BOX_DRY_TEMP`.
+- `qidi_box_drying`: start/stop drying; target capped by the material set up in every slot of the box (sensors ignored; ejected spools still count); Plus5 `BOX_START_DRYING`/`BOX_STOP_DRYING` (55 °C PLA/PVA/TPU, 65 °C PETG/ABS/ASA/PC/PA, 50 °C unknown) and `QIDI_MAX_BOX_DRY_TEMP`.
 - `qidi_box_load` / `qidi_box_unload`: refused while printing or paused.
 - `qidi_upload_file`: inline G-code or https from `QIDI_UPLOAD_ALLOWED_HOSTS`; never replaces the running job.
 

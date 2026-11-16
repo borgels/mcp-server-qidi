@@ -452,7 +452,8 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
     {
       title: 'QIDI Box drying',
       description:
-        'Start or stop drying in a QIDI Box. The server caps the temperature by the filament in the box: 55 °C when any PLA/PVA/TPU is in it, ' +
+        'Start or stop drying in a QIDI Box. The server caps the temperature by the material set up in ALL slots of the box ' +
+        '(filament sensors are not trusted: spools are usually ejected before drying): 55 °C when any slot holds PLA/PVA/TPU, ' +
         `65 °C for PETG, ABS, ASA, PC, PA and similar, ${UNKNOWN_FILAMENT_DRY_MAX} °C for anything it does not recognise, never above QIDI_MAX_BOX_DRY_TEMP. ` +
         'A request above the cap is refused, not lowered. The cap follows the slot setup, so fix wrong slots with qidi_box_set_slot first.',
       inputSchema: {
@@ -470,8 +471,8 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
         if (!box) throw new PrinterStateError(`Box ${args.box} is not connected. Online boxes: ${status.boxes.map(b => b.box).join(', ') || 'none'}.`);
 
         if (args.action === 'stop') {
-          await requireCommand(client, ['DISABLE_BOX_DRY']);
-          await client.gcode(`DISABLE_BOX_DRY BOX=${args.box}`);
+          const stop = await requireCommand(client, ['BOX_STOP_DRYING', 'DISABLE_BOX_DRY']);
+          await client.gcode(`${stop} BOX=${args.box}`);
           return text(`Drying stopped in box ${args.box}.`);
         }
 
@@ -484,8 +485,10 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
             `${args.temperature} °C is above the drying limit of ${limit.max} °C for box ${args.box} (${limit.reason}). Nothing was started.`,
           );
         }
-        await requireCommand(client, ['ENABLE_BOX_DRY']);
-        await client.gcode(`ENABLE_BOX_DRY BOX=${args.box} TEMP=${args.temperature} END_TIME=${args.hours}`);
+        // Plus5 touchscreen: BOX_START_DRYING BOX=1 TIME=<hours> TEMP=<°C>; older Box firmware: ENABLE_BOX_DRY ... END_TIME=<hours>.
+        const start = await requireCommand(client, ['BOX_START_DRYING', 'ENABLE_BOX_DRY']);
+        const time = start === 'BOX_START_DRYING' ? `TIME=${args.hours}` : `END_TIME=${args.hours}`;
+        await client.gcode(`${start} BOX=${args.box} ${time} TEMP=${args.temperature}`);
         const heater = await client
           .queryObjects({ [`heater_generic heater_box${args.box}`]: ['target', 'temperature'] })
           .then(s => s[`heater_generic heater_box${args.box}`])
@@ -526,9 +529,6 @@ export function registerQidiTools(server: McpServer, client: MoonrakerClient, co
             throw new PrinterStateError(`Printer is ${stats.state}${stats.filename ? ` (${stats.filename})` : ''}; filament cannot be ${verb}ed during a print.`);
           }
           const slot = await requireSlot(client, args.slot);
-          if (verb === 'load' && !slot.filamentInserted) {
-            throw new PrinterStateError(`${slot.name} has no filament inserted.`);
-          }
           const command = await requireCommand(client, commands);
           const finished = await acceptLongCommand(client, `${command} SLOT=${slot.index}`, async error => {
             await writeAuditEvent({ tool, actingAs, action: 'error', args, status: 'error', error });
@@ -739,12 +739,16 @@ interface SlotInfo {
   type?: unknown;
 }
 
-/** Highest drying temperature allowed for a box, from the filament inserted in its slots. */
+/**
+ * Highest drying temperature allowed for a box, from the material set up in every slot. The insert
+ * sensors are deliberately ignored: filament is ejected before drying, so they read empty while the
+ * spools are still in the box.
+ */
 export function dryLimit(slots: SlotInfo[]): { max: number; reason: string } {
   const ceiling = boxDryMaxTemp();
   let max = ceiling;
   let reason = `server ceiling QIDI_MAX_BOX_DRY_TEMP=${ceiling} °C`;
-  for (const slot of slots.filter(s => s.filamentInserted)) {
+  for (const slot of slots) {
     const type = typeof slot.type === 'string' && slot.type ? slot.type : typeof slot.material === 'string' ? slot.material : undefined;
     const slotMax = dryMaxForType(type);
     if (slotMax < max) {
