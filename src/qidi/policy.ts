@@ -8,7 +8,8 @@ export type ToolTier = 'read' | 'control' | 'print';
  *
  * - read:    status, camera, files, history. Always on.
  * - control: things that change what the printer is doing right now
- *            (light, temperatures, pause/resume/cancel, emergency stop).
+ *            (light, temperatures, pause/resume/cancel, emergency stop,
+ *            QIDI Box slot setup/drying/load/unload, G-code upload).
  *            QIDI_ENABLE_CONTROL=true.
  * - print:   starting a job, the one action that moves a hot nozzle over a
  *            plate nobody is standing next to. QIDI_ENABLE_PRINT_START=true.
@@ -29,6 +30,11 @@ export const TOOL_TIERS: Record<string, ToolTier> = {
   qidi_cancel_print: 'control',
   qidi_emergency_stop: 'control',
   qidi_firmware_restart: 'control',
+  qidi_box_set_slot: 'control',
+  qidi_box_drying: 'control',
+  qidi_box_load: 'control',
+  qidi_box_unload: 'control',
+  qidi_upload_file: 'control',
   qidi_start_print: 'print',
 };
 
@@ -96,4 +102,27 @@ export function validateQidiEnv(env: Env = process.env): void {
   temperatureLimits(env);
   plateCheckMaxAgeMs(env);
   requestTimeoutMs(env);
+  boxDryMaxTemp(env);
+  maxUploadBytes(env);
+}
+
+/** Hard ceiling for a QIDI Box drying target, whatever the filament (°C). */
+export function boxDryMaxTemp(env: Env = process.env): number {
+  return readEnvInteger('QIDI_MAX_BOX_DRY_TEMP', 65, { min: 30, max: 90 }, env);
+}
+
+/** Largest G-code upload accepted (MB). */
+export function maxUploadBytes(env: Env = process.env): number {
+  return readEnvInteger('QIDI_MAX_UPLOAD_MB', 100, { min: 1, max: 1024 }, env) * 1024 * 1024;
+}
+
+/**
+ * Hosts qidi_upload_file may download from (https only). Empty = URL uploads
+ * are off, so the server cannot be pointed at arbitrary addresses on its network.
+ */
+export function uploadAllowedHosts(env: Env = process.env): string[] {
+  return (env.QIDI_UPLOAD_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map(host => host.trim().toLowerCase())
+    .filter(Boolean);
 }

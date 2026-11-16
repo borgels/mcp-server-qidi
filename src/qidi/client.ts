@@ -52,6 +52,47 @@ export class MoonrakerClient {
     return this.request<T>('POST', path, query);
   }
 
+  /** Download a file from a Moonraker root as text, e.g. ('config', 'officiall_filas_list.cfg'). */
+  async fileText(root: string, filename: string): Promise<string> {
+    const path = `/server/files/${encodeURIComponent(root)}/${filename.split('/').map(encodeURIComponent).join('/')}`;
+    const response = await this.fetchImpl(new URL(path, `${this.baseUrl}/`), {
+      headers: this.headers(),
+      redirect: 'manual',
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    this.assertNotRedirect(response, path);
+    if (!response.ok) {
+      throw new MoonrakerHttpError(response.status, path, parseJson(this.redact(await readTextUpTo(response, MAX_ERROR_BODY_BYTES))));
+    }
+    return response.text();
+  }
+
+  /** Upload a file into the gcodes root (Moonraker overwrites an existing file of the same name). */
+  async upload(filename: string, data: Uint8Array<ArrayBuffer>, timeoutMs = 120_000): Promise<unknown> {
+    const form = new FormData();
+    form.set('root', 'gcodes');
+    form.set('file', new Blob([data], { type: 'application/octet-stream' }), filename);
+    const path = '/server/files/upload';
+    const response = await this.fetchImpl(new URL(path, `${this.baseUrl}/`), {
+      method: 'POST',
+      headers: { accept: 'application/json', ...this.headers() },
+      body: form,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    this.assertNotRedirect(response, path);
+    const text = response.ok ? await response.text() : this.redact(await readTextUpTo(response, MAX_ERROR_BODY_BYTES));
+    const payload = parseJson(text);
+    if (!response.ok) throw new MoonrakerHttpError(response.status, path, payload);
+    return (payload as { result?: unknown } | undefined)?.result ?? payload;
+  }
+
+  /** Names of the G-code commands Klipper has registered (upper case). */
+  async gcodeCommands(): Promise<Set<string>> {
+    const help = await this.get<Record<string, string>>('/printer/gcode/help');
+    return new Set(Object.keys(help ?? {}).map(name => name.toUpperCase()));
+  }
+
   /** Query printer objects; `objects` maps object name → attributes (empty = all). */
   async queryObjects(objects: Record<string, string[] | null>): Promise<Record<string, Record<string, unknown>>> {
     const params = Object.entries(objects)
@@ -62,8 +103,8 @@ export class MoonrakerClient {
   }
 
   /** Run a G-code command. Only called with commands built from validated, enumerated input. */
-  async gcode(script: string): Promise<unknown> {
-    return this.post('/printer/gcode/script', { script });
+  async gcode(script: string, options: { timeoutMs?: number } = {}): Promise<unknown> {
+    return this.request('POST', '/printer/gcode/script', { script }, options.timeoutMs);
   }
 
   async snapshot(): Promise<Snapshot> {
@@ -113,7 +154,16 @@ export class MoonrakerClient {
     return { data: Buffer.from(await response.arrayBuffer()), mimeType };
   }
 
-  private async request<T>(method: 'GET' | 'POST', path: string, query: Record<string, string | number | undefined> = {}): Promise<T> {
+  private headers(): Record<string, string> {
+    return this.apiKey ? { 'x-api-key': this.apiKey } : {};
+  }
+
+  private async request<T>(
+    method: 'GET' | 'POST',
+    path: string,
+    query: Record<string, string | number | undefined> = {},
+    timeoutMs = this.timeoutMs,
+  ): Promise<T> {
     const url = new URL(path, `${this.baseUrl}/`);
     for (const [key, value] of Object.entries(query)) {
       if (value !== undefined) url.searchParams.set(key, String(value));
@@ -121,20 +171,15 @@ export class MoonrakerClient {
 
     const response = await this.fetchImpl(url, {
       method,
-      headers: { accept: 'application/json', ...(this.apiKey ? { 'x-api-key': this.apiKey } : {}) },
+      headers: { accept: 'application/json', ...this.headers() },
       // Never follow redirects: X-Api-Key would be re-sent to the redirect target.
       redirect: 'manual',
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     this.assertNotRedirect(response, path);
     // Error bodies are capped, and the API key is redacted before the error text is truncated.
     const text = response.ok ? await response.text() : this.redact(await readTextUpTo(response, MAX_ERROR_BODY_BYTES));
-    let payload: unknown = text;
-    try {
-      payload = text ? JSON.parse(text) : undefined;
-    } catch {
-      // keep text
-    }
+    const payload = parseJson(text);
     if (!response.ok) {
       throw new MoonrakerHttpError(response.status, path, payload);
     }
@@ -151,6 +196,15 @@ export class MoonrakerClient {
   /** Removes the configured API key from upstream text. */
   private redact(text: string): string {
     return this.apiKey && this.apiKey.length >= 4 ? text.split(this.apiKey).join('[REDACTED]') : text;
+  }
+}
+
+function parseJson(text: string): unknown {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
 }
 
