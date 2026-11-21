@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- License changed from Apache-2.0 to the Functional Source License, Version 1.1,
+  ALv2 Future License (FSL-1.1-ALv2). You may read, run, modify and use the code
+  internally and contribute changes; offering it as a competing commercial
+  product or service is not allowed. Each version becomes Apache-2.0 two years
+  after its release. Versions released before 0.3.0 remain under Apache-2.0
+  (see `NOTICE`).
 - `qidi_box_set_slot`: vendor, material and colour of a QIDI Box slot, validated against QIDI's filament list on the printer.
 - `qidi_box_drying`: start/stop drying; target capped by the material set up in every slot of the box (sensors ignored; ejected spools still count); Plus5 `BOX_START_DRYING`/`BOX_STOP_DRYING` (55 °C PLA/PVA/TPU, 65 °C PETG/ABS/ASA/PC/PA, 50 °C unknown) and `QIDI_MAX_BOX_DRY_TEMP`.
 - `qidi_box_load` / `qidi_box_unload`: refused while printing or paused.
