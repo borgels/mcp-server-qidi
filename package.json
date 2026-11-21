@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-qidi",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP server for a QIDI X-Plus5 (Klipper/Moonraker) 3D printer: status, webcam, QIDI Box, files, history, and gated control (light, temperatures, pause/resume/cancel, start print).",
   "type": "module",
   "main": "./dist/transports/stdio.js",
@@ -11,6 +11,7 @@
     "dist",
     "README.md",
     "LICENSE",
+    "NOTICE",
     "CHANGELOG.md",
     ".env.example"
   ],
@@ -38,7 +39,7 @@
     "3d-printer"
   ],
   "author": "",
-  "license": "Apache-2.0",
+  "license": "FSL-1.1-ALv2",
   "engines": {
     "node": ">=20.11"
   },
